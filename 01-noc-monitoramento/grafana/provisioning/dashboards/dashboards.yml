@@ -1,0 +1,11 @@
+# Carrega automaticamente os dashboards JSON da pasta grafana/dashboards
+apiVersion: 1
+providers:
+  - name: NOC Empresa X
+    folder: NOC
+    type: file
+    disableDeletion: false
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards

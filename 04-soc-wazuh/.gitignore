@@ -1,0 +1,4 @@
+*.log
+__pycache__/
+# Certificados e senhas gerados localmente – nunca versionar
+wazuh/config/wazuh_indexer_ssl_certs/

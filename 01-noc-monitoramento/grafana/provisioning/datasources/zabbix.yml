@@ -1,0 +1,21 @@
+# Cria a conexão (data source) do Grafana com a API do Zabbix automaticamente.
+# Usuário e senha vêm do arquivo .env
+apiVersion: 1
+# Recria o data source a cada inicialização (garante o UID fixo "zabbix")
+deleteDatasources:
+  - name: Zabbix
+    orgId: 1
+datasources:
+  - name: Zabbix
+    uid: zabbix            # UID fixo: os dashboards versionados apontam para ele
+    type: alexanderzobnin-zabbix-datasource
+    access: proxy
+    url: http://zabbix-web:8080/api_jsonrpc.php
+    isDefault: true
+    jsonData:
+      username: $ZABBIX_API_USER
+      trends: true
+      trendsFrom: 7d
+      trendsRange: 4d
+    secureJsonData:
+      password: $ZABBIX_API_PASSWORD

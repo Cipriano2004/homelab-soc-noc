@@ -1,0 +1,154 @@
+# Projeto 01 – NOC: Monitoramento com Zabbix + Grafana
+# Sobe: banco PostgreSQL, Zabbix Server, Zabbix Web, Zabbix Agent 2 (servidor e VM),
+# snmpd da VM, Grafana (com plugin do Zabbix e dashboards prontos),
+# um servidor web de teste para simular incidentes e um job que configura o Zabbix via API.
+#
+# Uso:  cp .env.example .env   (edite as senhas)
+#       docker compose up -d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: zbx-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      TZ: ${TZ}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [noc]
+    # Sem "ports": o banco NÃO fica exposto fora do Docker (boa prática).
+
+  zabbix-server:
+    image: zabbix/zabbix-server-pgsql:ubuntu-7.0-latest
+    container_name: zbx-server
+    restart: unless-stopped
+    depends_on: [postgres]
+    environment:
+      DB_SERVER_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      TZ: ${TZ}
+    ports:
+      - "10051:10051"   # agentes ativos (ex.: Windows) enviam dados para cá
+    networks: [noc]
+
+  zabbix-web:
+    image: zabbix/zabbix-web-nginx-pgsql:ubuntu-7.0-latest
+    container_name: zbx-web
+    restart: unless-stopped
+    depends_on: [zabbix-server]
+    environment:
+      ZBX_SERVER_HOST: zabbix-server
+      DB_SERVER_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      PHP_TZ: ${TZ}
+    ports:
+      - "8080:8080"     # interface web do Zabbix
+    networks: [noc]
+
+  zabbix-agent:
+    image: zabbix/zabbix-agent2:ubuntu-7.0-latest
+    container_name: zbx-agent
+    restart: unless-stopped
+    depends_on: [zabbix-server]
+    # O agente compartilha a rede do container do servidor. Assim o host
+    # "Zabbix server", que já vem cadastrado apontando para 127.0.0.1:10050,
+    # funciona sem nenhuma configuração manual na interface.
+    network_mode: "service:zabbix-server"
+    environment:
+      ZBX_HOSTNAME: "Zabbix server"   # mesmo nome do host que já vem cadastrado no Zabbix
+      ZBX_SERVER_HOST: "127.0.0.1"
+      TZ: ${TZ}
+
+  # Agente da VM: usa a rede e os processos do host, então mede a VM de verdade
+  # (CPU, memória, rede, disco). O Zabbix Server alcança em 172.30.0.1:10050.
+  vm-agent:
+    image: zabbix/zabbix-agent2:ubuntu-7.0-latest
+    container_name: vm-agent
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    volumes:
+      - /:/hostfs:ro           # disco da VM visível para o agente (somente leitura)
+    environment:
+      ZBX_HOSTNAME: "vm-noc-lab"
+      ZBX_SERVER_HOST: "172.30.0.0/24"   # só aceita conexões vindas da rede do lab
+      ZBX_ACTIVE_ALLOW: "false"          # template usado é passivo
+      TZ: ${TZ}
+
+  # SNMP da VM (porta 161/UDP), igual a roteadores/switches no dia a dia de NOC
+  snmpd:
+    image: alpine:3.20
+    container_name: snmpd
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    volumes:
+      - ./snmp/snmpd.conf:/etc/snmp/snmpd.conf:ro
+      - /:/hostfs:ro
+    command: >
+      sh -c "apk add --no-cache net-snmp >/dev/null &&
+             exec snmpd -f -Lo -C -c /etc/snmp/snmpd.conf"
+
+  # Job de uma vez só: configura hosts, itens, triggers e alertas via API do Zabbix
+  zabbix-setup:
+    image: python:3.12-alpine
+    container_name: zbx-setup
+    restart: "no"
+    depends_on: [zabbix-web]
+    volumes:
+      - ./setup:/setup:ro
+    environment:
+      ZBX_API_URL: http://zabbix-web:8080/api_jsonrpc.php
+      ZBX_API_USER: ${ZABBIX_API_USER}
+      ZBX_API_PASSWORD: ${ZABBIX_API_PASSWORD}
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      PYTHONUNBUFFERED: "1"
+    command: ["python", "/setup/configure_zabbix.py"]
+    networks: [noc]
+
+  grafana:
+    image: grafana/grafana-oss:11.6.0
+    container_name: grafana
+    restart: unless-stopped
+    depends_on: [zabbix-web]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_INSTALL_PLUGINS: alexanderzobnin-zabbix-app
+      ZABBIX_API_USER: ${ZABBIX_API_USER}
+      ZABBIX_API_PASSWORD: ${ZABBIX_API_PASSWORD}
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/noc-visao-geral.json
+      GF_USERS_DEFAULT_THEME: dark
+      TZ: ${TZ}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    ports:
+      - "3000:3000"     # interface web do Grafana
+    networks: [noc]
+
+  # "Serviço da empresa" que vamos derrubar de propósito para simular um incidente.
+  web-teste:
+    image: nginx:alpine
+    container_name: web-teste
+    restart: unless-stopped
+    networks: [noc]
+
+networks:
+  noc:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24   # fixa: o gateway 172.30.0.1 é a própria VM
+
+volumes:
+  pgdata:
+  grafana-data:
